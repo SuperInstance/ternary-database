@@ -103,6 +103,14 @@ fn main() {
 
 Part of the SuperInstance ternary crate family. `ternary-database` sits at the data layer. `ternary-voting` results can be stored here, `ternary-cell` tissue states can be persisted, and `ternary-visualization` can render query results. The `Ternary` type uses the standard {-1, 0, +1} encoding consistent with all other crates.
 
+## See Also
+
+- **ternary-archive** — Append-only knowledge store with lifecycle management
+- **ternary-memory** — Short-term memory and recall for ternary agents
+- **ternary-hash** — Hashing algorithms for ternary data
+- **ternary-compression** — Compression for ternary-valued streams
+- **ternary-tensor** — Tensor operations on ternary-valued arrays
+
 ## License
 
 MIT
