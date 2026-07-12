@@ -366,7 +366,12 @@ impl TernaryTransaction {
     }
 
     pub fn log_update(&mut self, row_id: u64, table: &str, field: &str, value: FieldValue) {
-        self.log.push(TxnOp::Update(row_id, table.to_string(), field.to_string(), value));
+        self.log.push(TxnOp::Update(
+            row_id,
+            table.to_string(),
+            field.to_string(),
+            value,
+        ));
     }
 
     pub fn commit(&mut self) {
@@ -395,7 +400,7 @@ pub fn parse_ternary_query(sql: &str) -> Result<ParsedQuery, String> {
         return Err("Query must start with SELECT".to_string());
     }
 
-    let mut parts: Vec<&str> = sql.splitn(4, ' ').collect();
+    let parts: Vec<&str> = sql.splitn(4, ' ').collect();
     if parts.len() < 4 {
         return Err("Incomplete query".to_string());
     }
@@ -407,7 +412,11 @@ pub fn parse_ternary_query(sql: &str) -> Result<ParsedQuery, String> {
     let rest = &sql[7..]; // after "SELECT "
     let from_pos = rest.to_lowercase().find("from").ok_or("Missing FROM")?;
     let table_part = rest[from_pos + 5..].trim();
-    let table_name: String = table_part.split_whitespace().next().unwrap_or("").to_string();
+    let table_name: String = table_part
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
 
     if table_name.is_empty() {
         return Err("Missing table name".to_string());
@@ -564,8 +573,7 @@ mod tests {
             row.set("status", FieldValue::Ternary(t));
             table.insert(row);
         }
-        let query = TernaryQuery::new(&table)
-            .filter("status", FilterOp::Eq(Ternary::Pos));
+        let query = TernaryQuery::new(&table).filter("status", FilterOp::Eq(Ternary::Pos));
         let results = query.execute();
         assert_eq!(results.len(), 2);
     }
@@ -578,8 +586,7 @@ mod tests {
             row.set("val", FieldValue::Ternary(t));
             table.insert(row);
         }
-        let query = TernaryQuery::new(&table)
-            .filter("val", FilterOp::Gt(Ternary::Neg));
+        let query = TernaryQuery::new(&table).filter("val", FilterOp::Gt(Ternary::Neg));
         let results = query.execute();
         assert_eq!(results.len(), 2); // Zero and Pos
     }
@@ -592,8 +599,7 @@ mod tests {
             row.set("val", FieldValue::Ternary(t));
             table.insert(row);
         }
-        let query = TernaryQuery::new(&table)
-            .sort("val", SortDir::Asc);
+        let query = TernaryQuery::new(&table).sort("val", SortDir::Asc);
         let results = query.execute();
         assert_eq!(results.len(), 3);
     }
