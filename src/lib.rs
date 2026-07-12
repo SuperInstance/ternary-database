@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
-
-//! Database operations for ternary data.
+#![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
 
