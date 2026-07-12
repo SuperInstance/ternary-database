@@ -539,6 +539,7 @@ mod tests {
     #[test]
     fn test_btree_index_sorted() {
         let mut table = TernaryTable::new("test");
+        // Insertion order is intentionally non-sorted: Pos, Neg, Zero (ids 1, 2, 3).
         for t in [Ternary::Pos, Ternary::Neg, Ternary::Zero] {
             let mut row = Row::new(0);
             row.set("level", FieldValue::Ternary(t));
@@ -548,7 +549,16 @@ mod tests {
         idx.build(&table);
         let sorted = idx.sorted_ids();
         assert_eq!(sorted.len(), 3);
-        // First should be Neg, then Zero, then Pos
+        // Buckets concatenate neg -> zero -> pos regardless of insertion order.
+        assert_eq!(sorted, vec![2, 3, 1]);
+        let values: Vec<Ternary> = sorted
+            .iter()
+            .map(|id| match table.get(*id).unwrap().get("level").unwrap() {
+                FieldValue::Ternary(t) => *t,
+                _ => unreachable!("field is ternary"),
+            })
+            .collect();
+        assert_eq!(values, vec![Ternary::Neg, Ternary::Zero, Ternary::Pos]);
     }
 
     #[test]
@@ -594,14 +604,35 @@ mod tests {
     #[test]
     fn test_query_sort() {
         let mut table = TernaryTable::new("test");
+        // Insertion order intentionally non-sorted: Pos, Neg, Zero.
         for t in [Ternary::Pos, Ternary::Neg, Ternary::Zero] {
             let mut row = Row::new(0);
             row.set("val", FieldValue::Ternary(t));
             table.insert(row);
         }
-        let query = TernaryQuery::new(&table).sort("val", SortDir::Asc);
-        let results = query.execute();
-        assert_eq!(results.len(), 3);
+        let asc_query = TernaryQuery::new(&table).sort("val", SortDir::Asc);
+        let asc = asc_query.execute();
+        assert_eq!(asc.len(), 3);
+        let asc_vals: Vec<i64> = asc
+            .iter()
+            .map(|r| match r.get("val").unwrap() {
+                FieldValue::Ternary(t) => t.value() as i64,
+                _ => unreachable!("field is ternary"),
+            })
+            .collect();
+        assert_eq!(asc_vals, vec![-1, 0, 1]);
+
+        let desc = TernaryQuery::new(&table)
+            .sort("val", SortDir::Desc)
+            .execute();
+        let desc_vals: Vec<i64> = desc
+            .iter()
+            .map(|r| match r.get("val").unwrap() {
+                FieldValue::Ternary(t) => t.value() as i64,
+                _ => unreachable!("field is ternary"),
+            })
+            .collect();
+        assert_eq!(desc_vals, vec![1, 0, -1]);
     }
 
     #[test]
@@ -694,5 +725,236 @@ mod tests {
         assert_eq!(fv1, FieldValue::Integer(42));
         assert_eq!(fv2, FieldValue::Text("hello".to_string()));
         assert_eq!(fv3, FieldValue::Null);
+    }
+
+    #[test]
+    fn test_ternary_from_value_all_valid() {
+        // Previously only -1 (and the invalid 2) were covered; 0 and 1 are real
+        // branches of from_value that went untested.
+        assert_eq!(Ternary::from_value(0), Some(Ternary::Zero));
+        assert_eq!(Ternary::from_value(1), Some(Ternary::Pos));
+        assert_eq!(Ternary::from_value(-1), Some(Ternary::Neg));
+        assert_eq!(Ternary::from_value(2), None);
+        assert_eq!(Ternary::from_value(-2), None);
+        assert_eq!(Ternary::from_value(i8::MIN), None);
+        assert_eq!(Ternary::from_value(i8::MAX), None);
+    }
+
+    #[test]
+    fn test_table_get_mut_and_scan_all() {
+        let mut table = TernaryTable::new("test");
+        let mut row = Row::new(0);
+        row.set("v", FieldValue::Ternary(Ternary::Neg));
+        let id = table.insert(row);
+        assert_eq!(table.scan_all().len(), 1);
+        {
+            let r = table.get_mut(id).expect("row must exist");
+            r.set("v", FieldValue::Ternary(Ternary::Pos));
+        }
+        match table.get(id).unwrap().get("v") {
+            Some(FieldValue::Ternary(Ternary::Pos)) => {}
+            other => panic!("expected updated Pos, got {:?}", other),
+        }
+        // get_mut on a missing id returns None.
+        assert!(table.get_mut(9999).is_none());
+        // rows() yields the same count as scan_all.
+        assert_eq!(table.rows().count(), table.scan_all().len());
+    }
+
+    fn table_with_all_three() -> TernaryTable {
+        let mut table = TernaryTable::new("test");
+        for t in [Ternary::Neg, Ternary::Zero, Ternary::Pos] {
+            let mut row = Row::new(0);
+            row.set("v", FieldValue::Ternary(t));
+            table.insert(row);
+        }
+        table
+    }
+
+    #[test]
+    fn test_btree_index_range_full_and_inverted() {
+        let table = table_with_all_three();
+        let mut idx = TernaryBTreeIndex::new("v");
+        idx.build(&table);
+        // Full range covers all three buckets.
+        assert_eq!(idx.range(Ternary::Neg, Ternary::Pos).len(), 3);
+        // Single-value ranges collapse to one bucket.
+        assert_eq!(idx.range(Ternary::Zero, Ternary::Zero).len(), 1);
+        // Inverted (min > max) must yield an empty result, not a panic.
+        assert!(idx.range(Ternary::Pos, Ternary::Neg).is_empty());
+    }
+
+    #[test]
+    fn test_query_filter_operators() {
+        let table = table_with_all_three();
+        // Ne(Pos) -> Neg + Zero
+        assert_eq!(
+            TernaryQuery::new(&table)
+                .filter("v", FilterOp::Ne(Ternary::Pos))
+                .execute()
+                .len(),
+            2
+        );
+        // Lt(Zero) -> Neg only
+        assert_eq!(
+            TernaryQuery::new(&table)
+                .filter("v", FilterOp::Lt(Ternary::Zero))
+                .execute()
+                .len(),
+            1
+        );
+        // Gte(Zero) -> Zero + Pos
+        assert_eq!(
+            TernaryQuery::new(&table)
+                .filter("v", FilterOp::Gte(Ternary::Zero))
+                .execute()
+                .len(),
+            2
+        );
+        // Lte(Zero) -> Neg + Zero
+        assert_eq!(
+            TernaryQuery::new(&table)
+                .filter("v", FilterOp::Lte(Ternary::Zero))
+                .execute()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_query_filter_integer_and_missing_field() {
+        let mut table = TernaryTable::new("test");
+        let mut a = Row::new(0);
+        a.set("n", FieldValue::Integer(1));
+        let mut b = Row::new(0);
+        b.set("n", FieldValue::Integer(0));
+        let mut c = Row::new(0);
+        c.set("n", FieldValue::Integer(-1));
+        let mut d = Row::new(0);
+        d.set("n", FieldValue::Null);
+        table.insert(a);
+        table.insert(b);
+        table.insert(c);
+        table.insert(d);
+        // Integer branch compares against ternary value: Integer(1) == Pos.
+        assert_eq!(
+            TernaryQuery::new(&table)
+                .filter("n", FilterOp::Eq(Ternary::Pos))
+                .execute()
+                .len(),
+            1
+        );
+        // Rows whose value is Null, or that lack the field entirely, never match.
+        assert_eq!(
+            TernaryQuery::new(&table)
+                .filter("n", FilterOp::Gte(Ternary::Neg))
+                .execute()
+                .len(),
+            3
+        );
+        assert_eq!(
+            TernaryQuery::new(&table)
+                .filter("missing_field", FilterOp::Eq(Ternary::Pos))
+                .execute()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_query_sort_by_integer() {
+        let mut table = TernaryTable::new("test");
+        for i in [3, -1, 0, 7] {
+            let mut row = Row::new(0);
+            row.set("n", FieldValue::Integer(i));
+            table.insert(row);
+        }
+        let asc: Vec<i64> = TernaryQuery::new(&table)
+            .sort("n", SortDir::Asc)
+            .execute()
+            .iter()
+            .map(|r| match r.get("n") {
+                Some(FieldValue::Integer(i)) => *i,
+                _ => unreachable!("field is integer"),
+            })
+            .collect();
+        assert_eq!(asc, vec![-1, 0, 3, 7]);
+    }
+
+    #[test]
+    fn test_parse_query_operators_and_values() {
+        // Each supported operator parses to the right FilterOp variant.
+        assert!(matches!(
+            parse_ternary_query("SELECT f FROM t WHERE f > pos")
+                .unwrap()
+                .filter,
+            Some((_, FilterOp::Gt(Ternary::Pos)))
+        ));
+        assert!(matches!(
+            parse_ternary_query("SELECT f FROM t WHERE f >= zero")
+                .unwrap()
+                .filter,
+            Some((_, FilterOp::Gte(Ternary::Zero)))
+        ));
+        assert!(matches!(
+            parse_ternary_query("SELECT f FROM t WHERE f <= pos")
+                .unwrap()
+                .filter,
+            Some((_, FilterOp::Lte(Ternary::Pos)))
+        ));
+        assert!(matches!(
+            parse_ternary_query("SELECT f FROM t WHERE f != neg")
+                .unwrap()
+                .filter,
+            Some((_, FilterOp::Ne(Ternary::Neg)))
+        ));
+        // Numeric spellings also accepted.
+        assert!(matches!(
+            parse_ternary_query("SELECT f FROM t WHERE f = -1")
+                .unwrap()
+                .filter,
+            Some((_, FilterOp::Eq(Ternary::Neg)))
+        ));
+        assert!(matches!(
+            parse_ternary_query("SELECT f FROM t WHERE f = 0")
+                .unwrap()
+                .filter,
+            Some((_, FilterOp::Eq(Ternary::Zero)))
+        ));
+        assert!(matches!(
+            parse_ternary_query("SELECT f FROM t WHERE f = 1")
+                .unwrap()
+                .filter,
+            Some((_, FilterOp::Eq(Ternary::Pos)))
+        ));
+    }
+
+    #[test]
+    fn test_parse_query_error_paths() {
+        // Missing FROM keyword.
+        assert!(parse_ternary_query("SELECT a b c").is_err());
+        // Unknown comparison operator.
+        assert!(parse_ternary_query("SELECT f FROM t WHERE f ~~ pos").is_err());
+        // Invalid ternary literal in WHERE.
+        assert!(parse_ternary_query("SELECT f FROM t WHERE f = 42").is_err());
+        // Non-SELECT statement.
+        assert!(parse_ternary_query("DELETE FROM t").is_err());
+        // Empty / whitespace-only input.
+        assert!(parse_ternary_query("   ").is_err());
+    }
+
+    #[test]
+    fn test_transaction_defaults_and_commit_flag() {
+        let txn = TernaryTransaction::new(7);
+        // A fresh transaction has no ops and is not committed.
+        assert!(!txn.is_committed());
+        assert_eq!(txn.id, 7);
+        assert!(txn.rollback_log().is_empty());
+        assert_eq!(txn.op_count(), 0);
+        let mut txn = txn;
+        txn.commit();
+        assert!(txn.is_committed());
+        // Commit does not clear the log.
+        assert_eq!(txn.rollback_log().len(), 0);
     }
 }
