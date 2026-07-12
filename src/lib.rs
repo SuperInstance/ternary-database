@@ -272,7 +272,7 @@ impl<'a> TernaryQuery<'a> {
         }
     }
 
-    pub fn execute(&self) -> Vec<&Row> {
+    pub fn execute(&self) -> Vec<&'a Row> {
         let mut results: Vec<&Row> = self
             .table
             .rows()
